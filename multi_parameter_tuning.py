@@ -23,9 +23,9 @@ def _build_exog_from_series(y: pd.Series) -> pd.DataFrame:
 
 
 def _sarima_mape(tr, val, p, d, q, P, D, Q):
-    """Fit SARIMAX(+exog) and return recursive-validation MAPE %, or NaN on failure."""
+    """Fit SARIMAX(+exog) and return sklearn MAPE (%) on full validation horizon."""
     try:
-        # Build train exog and drop initial warm-up rows from lag/MA
+        # Build train exog and drop only training warm-up rows from lag/MA features
         exog_tr_full = _build_exog_from_series(tr)
         valid_idx = exog_tr_full.dropna().index
         if len(valid_idx) < 8:
@@ -44,7 +44,7 @@ def _sarima_mape(tr, val, p, d, q, P, D, Q):
             enforce_invertibility=False,
         ).fit(disp=False)
 
-        # Recursive prediction on validation horizon
+        # Recursive prediction on validation horizon (uses all validation dates)
         hist = tr_fit.copy()
         endog_name = hist.name if hist.name is not None else 'y'
         preds = []
@@ -66,23 +66,32 @@ def _sarima_mape(tr, val, p, d, q, P, D, Q):
         yt = val.values.astype(float)
         yp = np.array(preds, dtype=float)
 
-        non_zero = yt != 0
-        if non_zero.sum() == 0:
+        # Ensure no validation points are dropped
+        if len(yt) != len(yp):
             return np.nan
 
-        return float(np.mean(np.abs((yt[non_zero] - yp[non_zero]) / yt[non_zero])) * 100)
+        # Exact same metric family as model-evaluation cells
+        return float(mean_absolute_percentage_error(yt, yp) * 100)
 
     except Exception:
         return np.nan
 
 
 # ── Tuning 4: Full training set → test set (real out-of-sample) ──────────
-# train on all of train_y, validate on test_y
+# train on all of train_y, validate on full test_y horizon
+print(f"Validation points used in Tuning 4: {len(test_y)}")
+if len(test_y) != 12:
+    print("[WARN] Test horizon is not 12 months in current filtered dataset.")
+
 rows = []
 for p, d, q, P, D, Q in _grid:
     mape = _sarima_mape(train_y, test_y, p, d, q, P, D, Q)
     if not np.isnan(mape):
-        rows.append({'p': p, 'd': d, 'q': q, 'P': P, 'D': D, 'Q': Q, 'MAPE': round(mape, 2)})
+        rows.append({
+            'p': p, 'd': d, 'q': q, 'P': P, 'D': D, 'Q': Q,
+            'MAPE': round(mape, 2),
+            'n_val_points': len(test_y),
+        })
 
 df_tune4 = pd.DataFrame(rows).sort_values('MAPE').reset_index(drop=True)
 best4 = df_tune4.iloc[0]
