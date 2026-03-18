@@ -1,6 +1,6 @@
 import itertools
 
-# ── Shared grid + helper (SARIMAX + new exogenous features) ───────────────
+# Very simple grid
 _grid = list(itertools.product(
     [0, 1, 2],  # p
     [0, 1],     # d
@@ -22,19 +22,39 @@ def _build_exog_from_series(y: pd.Series) -> pd.DataFrame:
     return exog
 
 
+def _recursive_forecast_with_exog(res, history: pd.Series, future_index) -> np.ndarray:
+    preds = []
+    state = res
+    hist = history.copy()
+    y_name = hist.name if hist.name is not None else 'y'
+
+    for dt in future_index:
+        x_next = pd.DataFrame({
+            'lag_1': [float(hist.iloc[-1])],
+            'ma_3': [float(hist.iloc[-3:].mean())],
+            'month_num': [int(pd.to_datetime(dt).month)],
+        }, index=[dt])[_EXOG_COLS]
+
+        y_hat = float(state.get_forecast(steps=1, exog=x_next).predicted_mean.iloc[0])
+        preds.append(y_hat)
+
+        y_new = pd.Series([y_hat], index=[dt], name=y_name, dtype=float)
+        hist = pd.concat([hist, y_new])
+        state = state.append(endog=y_new, exog=x_next, refit=False)
+
+    return np.array(preds, dtype=float)
+
+
 def _sarima_mape(tr, val, p, d, q, P, D, Q):
-    """Fit SARIMAX(+exog) and return sklearn MAPE (%) on full validation horizon."""
+    """Fit SARIMAX(+exog) and return MAPE % using ALL validation points."""
     try:
-        # Build train exog and drop only training warm-up rows from lag/MA features
+        # Build train exog (drop only warm-up rows from training side)
         exog_tr_full = _build_exog_from_series(tr)
         valid_idx = exog_tr_full.dropna().index
-        if len(valid_idx) < 8:
-            return np.nan
-
         tr_fit = tr.loc[valid_idx]
         exog_tr = exog_tr_full.loc[valid_idx, _EXOG_COLS]
 
-        state = SARIMAX(
+        res = SARIMAX(
             endog=tr_fit,
             exog=exog_tr,
             order=(p, d, q),
@@ -44,58 +64,32 @@ def _sarima_mape(tr, val, p, d, q, P, D, Q):
             enforce_invertibility=False,
         ).fit(disp=False)
 
-        # Recursive prediction on validation horizon (uses all validation dates)
-        hist = tr_fit.copy()
-        endog_name = hist.name if hist.name is not None else 'y'
-        preds = []
-
-        for dt in val.index:
-            x_next = pd.DataFrame({
-                'lag_1': [float(hist.iloc[-1])],
-                'ma_3': [float(hist.iloc[-3:].mean())],
-                'month_num': [int(pd.to_datetime(dt).month)],
-            }, index=[dt])[_EXOG_COLS]
-
-            y_hat = float(state.get_forecast(steps=1, exog=x_next).predicted_mean.iloc[0])
-            preds.append(y_hat)
-
-            y_new = pd.Series([y_hat], index=[dt], name=endog_name, dtype=float)
-            hist = pd.concat([hist, y_new])
-            state = state.append(endog=y_new, exog=x_next, refit=False)
-
+        # Use all validation points (for tuning 4 this is all 12 test points)
+        yp = _recursive_forecast_with_exog(res, tr_fit, val.index)
         yt = val.values.astype(float)
-        yp = np.array(preds, dtype=float)
 
-        # Ensure no validation points are dropped
-        if len(yt) != len(yp):
-            return np.nan
-
-        # Exact same metric family as model-evaluation cells
+        # Same metric used in your main evaluation
         return float(mean_absolute_percentage_error(yt, yp) * 100)
 
     except Exception:
         return np.nan
 
 
-# ── Tuning 4: Full training set → test set (real out-of-sample) ──────────
-# train on all of train_y, validate on full test_y horizon
-print(f"Validation points used in Tuning 4: {len(test_y)}")
-if len(test_y) != 12:
-    print("[WARN] Test horizon is not 12 months in current filtered dataset.")
-
+# Tuning 4: Full train -> test (uses all points in test_y)
 rows = []
 for p, d, q, P, D, Q in _grid:
     mape = _sarima_mape(train_y, test_y, p, d, q, P, D, Q)
     if not np.isnan(mape):
         rows.append({
-            'p': p, 'd': d, 'q': q, 'P': P, 'D': D, 'Q': Q,
+            'p': p, 'd': d, 'q': q,
+            'P': P, 'D': D, 'Q': Q,
             'MAPE': round(mape, 2),
             'n_val_points': len(test_y),
         })
 
 df_tune4 = pd.DataFrame(rows).sort_values('MAPE').reset_index(drop=True)
 best4 = df_tune4.iloc[0]
-print("Tuning 4 (Full train → test set, SARIMAX+exog) — Best Params:")
+print("Tuning 4 (Full train -> test set, SARIMAX+exog) - Best Params:")
 print(f"  order=({int(best4.p)},{int(best4.d)},{int(best4.q)})  "
       f"seasonal_order=({int(best4.P)},{int(best4.D)},{int(best4.Q)},12)  "
       f"MAPE={best4.MAPE:.2f}%")
