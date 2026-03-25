@@ -1,0 +1,95 @@
+train_y = train_df[TARGET_METRIC].astype(float)
+test_y = test_df[TARGET_METRIC].astype(float)
+
+acc_train = acc_train_y.astype(float).copy()
+acc_test = acc_fc.astype(float).copy()
+acc_train.index = train_y.index
+acc_test.index = test_y.index
+
+
+def build_exog_from_series(y: pd.Series, acc_series: pd.Series) -> pd.DataFrame:
+    idx = pd.to_datetime(y.index)
+    exog = pd.DataFrame(index=y.index)
+    exog['active_accounts'] = acc_series.reindex(y.index).astype(float)
+    exog['month_num'] = idx.month.astype(int)
+    exog['lag_1'] = y.shift(1)
+    exog['lag_12'] = y.shift(12)
+    return exog
+
+
+# Build training exog and align after lag NaNs
+exog_train_full = build_exog_from_series(train_y, acc_train)
+valid_idx = exog_train_full.dropna().index
+train_y_fit = train_y.loc[valid_idx]
+exog_train = exog_train_full.loc[valid_idx]
+
+main_model = SARIMAX(
+    endog=train_y_fit,
+    exog=exog_train,
+    order=(1, 1, 1),
+    seasonal_order=(1, 1, 0, 12),
+    trend='n',
+    enforce_stationarity=False,
+    enforce_invertibility=False,
+)
+main_result = main_model.fit(disp=False)
+print(main_result.summary())
+
+
+# Recursive forecast so lag_1 and lag_12 are available at each step
+def recursive_forecast_with_exog(
+    result_obj,
+    history_y: pd.Series,
+    future_index,
+    acc_future: pd.Series,
+) -> pd.Series:
+    preds = []
+    state = result_obj
+    hist = history_y.copy().astype(float)
+
+    for dt in future_index:
+        lag_1 = float(hist.iloc[-1])
+        lag_12 = float(hist.iloc[-12])
+        month_num = int(pd.to_datetime(dt).month)
+        active_accounts = float(acc_future.loc[dt])
+
+        x_next = pd.DataFrame(
+            {
+                'active_accounts': [active_accounts],
+                'month_num': [month_num],
+                'lag_1': [lag_1],
+                'lag_12': [lag_12],
+            },
+            index=[dt],
+        )
+
+        y_hat = float(state.get_forecast(steps=1, exog=x_next).predicted_mean.iloc[0])
+        preds.append(y_hat)
+
+        y_new = pd.Series([y_hat], index=[dt])
+        hist = pd.concat([hist, y_new])
+        state = state.append(endog=y_new, exog=x_next, refit=False)
+
+    return pd.Series(preds, index=future_index)
+
+
+main_fc = recursive_forecast_with_exog(
+    result_obj=main_result,
+    history_y=train_y_fit,
+    future_index=test_y.index,
+    acc_future=acc_test,
+)
+
+pred_df_main = build_pred_df(main_fc.values, test_y, pred_label='SARIMAX_exog_lag1_lag12')
+
+# Compatibility aliases for downstream tuning/refit cells
+main_train_y = train_y_fit
+main_test_y = test_y
+main_exog_train = exog_train
+
+# Note: this test exog uses actual test history to build lag features for grid-search comparability
+full_eval_y = pd.concat([train_y_fit, test_y])
+full_eval_acc = pd.concat([acc_train.reindex(train_y_fit.index), acc_test])
+main_exog_test = build_exog_from_series(full_eval_y, full_eval_acc).loc[main_test_y.index]
+
+pred_df_main
