@@ -3,10 +3,12 @@ test_y  = test_df[TARGET_METRIC].astype(float)
 
 
 def build_exog_from_series(y: pd.Series) -> pd.DataFrame:
-    """Feature set requested: lag_1, month_num, ma_3."""
+    """Feature set requested: lag_1, lag_6, lag_12, month_num, ma_3."""
     idx = pd.to_datetime(y.index)
     exog = pd.DataFrame(index=y.index)
     exog['lag_1'] = y.shift(1)
+    exog['lag_6'] = y.shift(6)
+    exog['lag_12'] = y.shift(12)
     exog['ma_3'] = y.shift(1).rolling(3).mean()
     exog['month_num'] = idx.month.astype(int)
     return exog
@@ -32,7 +34,7 @@ print(sarimax_result.summary())
 
 
 # Recursive forecast helper:
-# each new prediction is appended and reused for lag_1 / ma_3 of the next step.
+# each new prediction is appended and reused for lag_1 / lag_6 / lag_12 / ma_3 of the next step.
 def recursive_forecast_with_exog(result_obj, history: pd.Series, future_index) -> pd.Series:
     preds = []
     state = result_obj
@@ -40,11 +42,13 @@ def recursive_forecast_with_exog(result_obj, history: pd.Series, future_index) -
 
     for dt in future_index:
         lag_1 = float(hist.iloc[-1])
+        lag_6 = float(hist.iloc[-min(len(hist), 6)])
+        lag_12 = float(hist.iloc[-min(len(hist), 12)])
         ma_3 = float(hist.iloc[-3:].mean())
         month_num = int(pd.to_datetime(dt).month)
 
         x_next = pd.DataFrame(
-            {'lag_1': [lag_1], 'ma_3': [ma_3], 'month_num': [month_num]},
+            {'lag_1': [lag_1], 'lag_6': [lag_6], 'lag_12': [lag_12], 'ma_3': [ma_3], 'month_num': [month_num]},
             index=[dt],
         )
 
@@ -74,7 +78,7 @@ pred_df_sarimax
 
 #############################
 
-plot_results(pred_df_sarimax, f'SARIMAX + exog (lag_1, ma_3, month_num) — {TARGET_METRIC}')
+plot_results(pred_df_sarimax, f'SARIMAX + exog (lag_1, lag_6, lag_12, ma_3, month_num) — {TARGET_METRIC}')
 evaluate_pred_df(pred_df_sarimax, 'SARIMAX_exog_recursive')
 
 
@@ -116,7 +120,7 @@ display(future_2026_df.head())
 
 plt.figure(figsize=(14, 4))
 plt.plot(future_2026_df['DATE'].astype(str), future_2026_df['METRIC_VALUE'], marker='o', color='#FF5722')
-plt.title(f'2026 Forecast using recursive lag_1 / ma_3 / month_num — {TARGET_METRIC}')
+plt.title(f'2026 Forecast using recursive lag_1 / lag_6 / lag_12 / ma_3 / month_num — {TARGET_METRIC}')
 plt.xlabel('DATE')
 plt.ylabel('METRIC_VALUE')
 plt.xticks(rotation=90)
